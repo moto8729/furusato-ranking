@@ -2,6 +2,8 @@ import os
 import json
 import gspread
 import smtplib
+import time
+import random
 from datetime import datetime
 from email.mime.text import MIMEText
 from oauth2client.service_account import ServiceAccountCredentials
@@ -11,12 +13,14 @@ import playwright_stealth
 def scrape_furusato():
     results = []
     with sync_playwright() as p:
-        # ブラウザを起動。少しゆっくり動かす設定を追加
+        # iPhone 13 Proの設定を借りる
+        iphone = p.devices['iPhone 13 Pro']
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1280, 'height': 800},
-            locale="ja-JP"
+            **iphone,
+            locale="ja-JP",
+            timezone_id="Asia/Tokyo",
+            extra_http_headers={"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"}
         )
 
         sites = [
@@ -45,13 +49,19 @@ def scrape_furusato():
 
         for s in sites:
             try:
+                # アクセス前に5〜10秒のランダムな休憩
+                time.sleep(random.uniform(5, 10))
+                
                 page = context.new_page()
                 playwright_stealth.stealth(page)
                 
-                # 1. お米ランキングの取得 (タイムアウト対策で待機条件を緩和)
-                page.goto(s["rice_url"], wait_until="commit", timeout=90000)
-                # 要素が出るまで最大15秒待つ
-                page.wait_for_selector(s["item_sel"], timeout=15000)
+                # 1. お米ランキングの取得
+                # タイムアウトを120秒に延長し、読み込み完了を待たずに進む
+                page.goto(s["rice_url"], wait_until="domcontentloaded", timeout=120000)
+                page.wait_for_timeout(5000) # 画面が開くまで5秒待つ
+                
+                # 商品名が出てくるのを待つ
+                page.wait_for_selector(s["item_sel"], timeout=20000)
                 
                 rice_top_name = page.locator(s["item_sel"]).first.inner_text().strip()
                 rice_top_price = page.locator(s["price_sel"]).first.inner_text().strip()
@@ -67,8 +77,8 @@ def scrape_furusato():
                             break
 
                 # 2. 総合ランキングでお米1位を探す
-                page.goto(s["total_url"], wait_until="commit", timeout=90000)
-                page.wait_for_selector(s["item_sel"], timeout=15000)
+                page.goto(s["total_url"], wait_until="domcontentloaded", timeout=120000)
+                page.wait_for_timeout(5000)
                 
                 overall_rank = "圏外"
                 total_items = page.locator(s["item_sel"]).all_inner_texts()
@@ -77,12 +87,13 @@ def scrape_furusato():
                         overall_rank = f"{i}位"
                         break
                 
-                results.append([s["name"], "取得完了", rice_top_name[:40], rice_top_price, overall_rank, kz_rank, "ふさおとめ等", "確認中"])
+                results.append([s["name"], "成功", rice_top_name[:40], rice_top_price, overall_rank, kz_rank, "ふさおとめ等", "12,000円"])
                 page.close()
+                print(f"{s['name']} の取得に成功しました")
+
             except Exception as e:
-                # 失敗しても記録は残す
-                results.append([s["name"], "一部失敗", "読込エラー", "-", "-", "-", "-", "-"])
-                print(f"Error at {s['name']}: {e}")
+                results.append([s["name"], "取得失敗", "読込エラー", "-", "-", "-", "-", "-"])
+                print(f"{s['name']} でエラーが発生しました: {e}")
 
         browser.close()
     return results
@@ -103,9 +114,9 @@ def update_sheet(data):
 def send_email(data):
     try:
         today = datetime.now().strftime("%Y/%m/%d")
-        body = f"{today} のランキング結果報告\n\n"
+        body = f"{today} のふるさと納税ランキング結果（iPhone偽装モード）\n\n"
         for r in data:
-            body += f"【{r[0]}】\n・お米1位: {r[2]}\n・総合順位: {r[4]}\n・神崎町順位: {r[5]}\n\n"
+            body += f"【{r[0]}】\n・状態: {r[1]}\n・お米1位: {r[2]}\n・総合順位: {r[4]}\n・神崎町順位: {r[5]}\n\n"
         msg = MIMEText(body)
         msg['Subject'] = f"【自動】ランキング報告（{today}）"
         msg['From'] = os.environ["EMAIL_USER"]
