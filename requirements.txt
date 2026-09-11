@@ -1,4 +1,5 @@
 gspread
 oauth2client
-requests
+playwright
+playwright-stealth
 beautifulsoup4
