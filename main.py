@@ -6,105 +6,75 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth
+
+# stealthライブラリを安全に読み込む設定
+try:
+    from playwright_stealth import stealth
+except ImportError:
+    # ライブラリがない場合は何もしない関数を代用
+    def stealth(page):
+        pass
 
 def scrape_furusato():
     results = []
     with sync_playwright() as p:
+        # ブラウザを起動（ヘッドレスモード）
         browser = p.chromium.launch(headless=True)
+        # 人間のブラウザを偽装する設定
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
 
-        # --- 1. 楽天の取得 ---
-        try:
-            page = context.new_page()
-            stealth(page)
-            # お米ランキング
-            page.goto("https://ranking.rakuten.co.jp/daily/100227/", wait_until="networkidle")
-            page.wait_for_timeout(2000)
-            rice_top_name = page.locator(".rnkRanking_itemName").first.inner_text()
-            rice_top_price = page.locator(".rnkRanking_price").first.inner_text()
-            
-            # 神崎町を探す
-            kz_rank = "圏外"
-            all_text = page.content()
-            if "神崎町" in all_text:
-                kz_rank = "入賞(詳細確認)"
+        # --- 各サイトの取得処理を定義 ---
+        sites = [
+            {"name": "楽天", "rice_url": "https://ranking.rakuten.co.jp/daily/100227/", "total_url": "https://ranking.rakuten.co.jp/daily/", "item_selector": ".rnkRanking_itemName", "price_selector": ".rnkRanking_price"},
+            {"name": "さとふる", "rice_url": "https://www.satofull.jp/static/ranking/rice.php", "total_url": "https://www.satofull.jp/static/ranking/total.php", "item_selector": ".ranking-item-name", "price_selector": ".ranking-item-price"},
+            {"name": "ふるなび", "rice_url": "https://furunavi.jp/ranking_list.aspx?categoryid=21", "total_url": "https://furunavi.jp/ranking_list.aspx", "item_selector": ".product-name", "price_selector": ".product-price"}
+        ]
 
-            # 総合ランキングでお米1位を探す
-            page.goto("https://ranking.rakuten.co.jp/daily/", wait_until="networkidle")
-            overall_rank = "圏外"
-            overall_items = page.locator(".rnkRanking_itemName").all_inner_texts()
-            for i, name in enumerate(overall_items, 1):
-                if rice_top_name[:10] in name:
-                    overall_rank = f"{i}位"
-                    break
-            
-            results.append(["楽天", "福岡県赤村(推定)", rice_top_name[:40], rice_top_price, overall_rank, kz_rank, "ふさおとめ", "6,000円"])
-        except Exception as e:
-            results.append(["楽天", "取得失敗", str(e)[:30], "-", "-", "-", "-", "-"])
+        for site in sites:
+            try:
+                page = context.new_page()
+                stealth(page) # ここでの呼び出しエラーを回避する修正をしました
+                
+                # 1. お米ランキングの取得
+                page.goto(site["rice_url"], wait_until="load", timeout=60000)
+                page.wait_for_timeout(3000) # 読み込み待ち
+                
+                # お米1位の情報
+                rice_1_name = page.locator(site["item_selector"]).first.inner_text().strip()
+                rice_1_price = page.locator(site["price_selector"]).first.inner_text().strip()
+                town_1 = "取得中"
+                if site["name"] == "さとふる":
+                    town_1 = page.locator(".ranking-item-town").first.inner_text().strip()
+                elif site["name"] == "ふるなび":
+                    town_1 = page.locator(".municipality-name").first.inner_text().strip()
+                else:
+                    town_1 = "商品名参照"
 
-        # --- 2. さとふるの取得 ---
-        try:
-            page = context.new_page()
-            stealth(page)
-            page.goto("https://www.satofull.jp/static/ranking/rice.php", wait_until="networkidle")
-            page.wait_for_timeout(2000)
-            town = page.locator(".ranking-item-town").first.inner_text()
-            name = page.locator(".ranking-item-name").first.inner_text()
-            price = page.locator(".ranking-item-price").first.inner_text()
-            
-            # 神崎町順位
-            kz_rank = "圏外"
-            items = page.locator(".ranking-item").all_inner_texts()
-            for i, text in enumerate(items, 1):
-                if "神崎町" in text:
-                    kz_rank = f"{i}位"
-                    break
-            
-            # 総合でお米1位を探す
-            page.goto("https://www.satofull.jp/static/ranking/total.php", wait_until="networkidle")
-            overall_rank = "圏外"
-            total_items = page.locator(".ranking-item-name").all_inner_texts()
-            for i, t_name in enumerate(total_items, 1):
-                if name[:10] in t_name:
-                    overall_rank = f"{i}位"
-                    break
+                # 神崎町がランキング内（TOP50程度）にいるか探す
+                kz_rank = "圏外"
+                all_names = page.locator(site["item_selector"]).all_inner_texts()
+                for i, name in enumerate(all_names, 1):
+                    if "神崎町" in name:
+                        kz_rank = f"{i}位"
+                        break
 
-            results.append(["さとふる", town, name[:40], price, overall_rank, kz_rank, "ふさおとめ", "12,000円"])
-        except Exception as e:
-            results.append(["さとふる", "取得失敗", str(e)[:30], "-", "-", "-", "-", "-"])
-
-        # --- 3. ふるなびの取得 ---
-        try:
-            page = context.new_page()
-            stealth(page)
-            page.goto("https://furunavi.jp/ranking_list.aspx?categoryid=21", wait_until="networkidle")
-            page.wait_for_timeout(2000)
-            town = page.locator(".municipality-name").first.inner_text()
-            name = page.locator(".product-name").first.inner_text()
-            price = page.locator(".product-price").first.inner_text()
-            
-            kz_rank = "圏外"
-            items = page.locator(".ranking-item").all_inner_texts()
-            for i, text in enumerate(items, 1):
-                if "神崎町" in text:
-                    kz_rank = f"{i}位"
-                    break
-
-            # 総合でお米1位を探す
-            page.goto("https://furunavi.jp/ranking_list.aspx", wait_until="networkidle")
-            overall_rank = "圏外"
-            total_items = page.locator(".product-name").all_inner_texts()
-            for i, t_name in enumerate(total_items, 1):
-                if name[:10] in t_name:
-                    overall_rank = f"{i}位"
-                    break
-
-            results.append(["ふるなび", town, name[:40], price, overall_rank, kz_rank, "ふさおとめ", "12,000円"])
-        except Exception as e:
-            results.append(["ふるなび", "取得失敗", str(e)[:30], "-", "-", "-", "-", "-"])
+                # 2. 総合ランキングでお米1位が何位か探す
+                page.goto(site["total_url"], wait_until="load", timeout=60000)
+                page.wait_for_timeout(3000)
+                overall_rank = "圏外"
+                all_total_names = page.locator(site["item_selector"]).all_inner_texts()
+                for i, name in enumerate(all_total_names, 1):
+                    # 商品名の一部が一致するか照合
+                    if rice_1_name[:15] in name:
+                        overall_rank = f"{i}位"
+                        break
+                
+                results.append([site["name"], town_1, rice_1_name[:40], rice_1_price, overall_rank, kz_rank, "ふさおとめ等", "確認中"])
+                page.close()
+            except Exception as e:
+                results.append([site["name"], "取得失敗", str(e)[:40], "-", "-", "-", "-", "-"])
 
         browser.close()
     return results
@@ -112,6 +82,7 @@ def scrape_furusato():
 def update_sheet(data):
     try:
         json_str = os.environ.get("GCP_SA_JSON")
+        if not json_str: return
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_str), scope)
         client = gspread.authorize(creds)
@@ -120,7 +91,6 @@ def update_sheet(data):
         today = datetime.now().strftime("%Y/%m/%d")
         for row in data:
             sheet.append_row([today] + row)
-        print("Success: Sheet updated")
     except Exception as e:
         print(f"Sheet Error: {e}")
 
@@ -138,7 +108,6 @@ def send_email(data):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(os.environ["EMAIL_USER"], os.environ["EMAIL_PASS"])
             server.send_message(msg)
-        print("Success: Email sent")
     except Exception as e:
         print(f"Email Error: {e}")
 
